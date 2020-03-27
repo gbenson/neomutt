@@ -78,7 +78,7 @@
 
 /* These Config Variables are only used in sendlib.c */
 bool C_Allow8bit; ///< Config: Allow 8-bit messages, don't use quoted-printable or base64
-char *C_AttachCharset; ///< Config: When attaching files, use one of these character sets
+struct Slist *C_AttachCharset; ///< Config: When attaching files, use one of these character sets
 bool C_BounceDelivered; ///< Config: Add 'Delivered-To' to bounced messages
 bool C_EncodeFrom; ///< Config: Encode 'From ' as 'quote-printable' at the beginning of lines
 bool C_ForwardDecrypt; ///< Config: Decrypt the message when forwarding it
@@ -783,7 +783,6 @@ static void update_content_info(struct Content *info, struct ContentState *s,
  * convert_file_to - Change the encoding of a file
  * @param[in]  fp         File to convert
  * @param[in]  fromcode   Original encoding
- * @param[in]  ncodes     Number of target encodings
  * @param[in]  tocodes    List of target encodings
  * @param[out] tocode     Chosen encoding
  * @param[in]  info       Encoding information
@@ -804,8 +803,8 @@ static void update_content_info(struct Content *info, struct ContentState *s,
  * long as the input for any pair of charsets we might be interested
  * in.
  */
-static size_t convert_file_to(FILE *fp, const char *fromcode, int ncodes,
-                              char const *const *tocodes, int *tocode, struct Content *info)
+static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist *tocodes,
+                              int *tocode, struct Content *info)
 {
   char bufi[256], bufu[512], bufo[4 * sizeof(bufi)];
   size_t ret;
@@ -814,20 +813,27 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, int ncodes,
   if (cd1 == (iconv_t)(-1))
     return -1;
 
-  iconv_t *cd = mutt_mem_calloc(ncodes, sizeof(iconv_t));
-  size_t *score = mutt_mem_calloc(ncodes, sizeof(size_t));
-  struct ContentState *states = mutt_mem_calloc(ncodes, sizeof(struct ContentState));
-  struct Content *infos = mutt_mem_calloc(ncodes, sizeof(struct Content));
+  iconv_t *cd = mutt_mem_calloc(tocodes->count, sizeof(iconv_t));
+  size_t *score = mutt_mem_calloc(tocodes->count, sizeof(size_t));
+  struct ContentState *states =
+      mutt_mem_calloc(tocodes->count, sizeof(struct ContentState));
+  struct Content *infos = mutt_mem_calloc(tocodes->count, sizeof(struct Content));
 
-  for (int i = 0; i < ncodes; i++)
   {
-    if (mutt_str_strcasecmp(tocodes[i], "utf-8") != 0)
-      cd[i] = mutt_ch_iconv_open(tocodes[i], "utf-8", 0);
-    else
+    int i = 0;
+    struct ListNode *node;
+    STAILQ_FOREACH(node, &tocodes->head, entries)
     {
-      /* Special case for conversion to UTF-8 */
-      cd[i] = (iconv_t)(-1);
-      score[i] = (size_t)(-1);
+      const char *code = node->data;
+      if (mutt_str_strcasecmp(code, "utf-8") != 0)
+        cd[i] = mutt_ch_iconv_open(code, "utf-8", 0);
+      else
+      {
+        /* Special case for conversion to UTF-8 */
+        cd[i] = (iconv_t)(-1);
+        score[i] = (size_t)(-1);
+      }
+      i++;
     }
   }
 
@@ -854,7 +860,7 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, int ncodes,
     const size_t ubl1 = ob - bufu;
 
     /* Convert from UTF-8 */
-    for (int i = 0; i < ncodes; i++)
+    for (int i = 0; i < tocodes->count; i++)
     {
       if ((cd[i] != (iconv_t)(-1)) && (score[i] != (size_t)(-1)))
       {
@@ -897,7 +903,7 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, int ncodes,
   {
     /* Find best score */
     ret = (size_t)(-1);
-    for (int i = 0; i < ncodes; i++)
+    for (int i = 0; i < tocodes->count; i++)
     {
       if ((cd[i] == (iconv_t)(-1)) && (score[i] == (size_t)(-1)))
       {
@@ -923,7 +929,7 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, int ncodes,
     }
   }
 
-  for (int i = 0; i < ncodes; i++)
+  for (int i = 0; i < tocodes->count; i++)
     if (cd[i] != (iconv_t)(-1))
       iconv_close(cd[i]);
 
@@ -957,8 +963,9 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, int ncodes,
  * However, if fromcode is zero then fromcodes is assumed to be the name of a
  * single charset even if it contains a colon.
  */
-static size_t convert_file_from_to(FILE *fp, const char *fromcodes, const char *tocodes,
-                                   char **fromcode, char **tocode, struct Content *info)
+static size_t convert_file_from_to(FILE *fp, const char *fromcodes,
+                                   const struct Slist *tocodes, char **fromcode,
+                                   char **tocode, struct Content *info)
 {
   char *fcode = NULL;
   char **tcode = NULL;
@@ -967,24 +974,7 @@ static size_t convert_file_from_to(FILE *fp, const char *fromcodes, const char *
   int ncodes, i, cn;
 
   /* Count the tocodes */
-  ncodes = 0;
-  for (c = tocodes; c; c = c1 ? c1 + 1 : 0)
-  {
-    c1 = strchr(c, ':');
-    if (c1 == c)
-      continue;
-    ncodes++;
-  }
-
-  /* Copy them */
-  tcode = mutt_mem_malloc(ncodes * sizeof(char *));
-  for (c = tocodes, i = 0; c; c = c1 ? c1 + 1 : 0, i++)
-  {
-    c1 = strchr(c, ':');
-    if (c1 == c)
-      continue;
-    tcode[i] = mutt_str_substr_dup(c, c1);
-  }
+  ncodes = tocodes->count;
 
   ret = (size_t)(-1);
   if (fromcode)
@@ -997,7 +987,7 @@ static size_t convert_file_from_to(FILE *fp, const char *fromcodes, const char *
         continue;
       fcode = mutt_str_substr_dup(c, c1);
 
-      ret = convert_file_to(fp, fcode, ncodes, (char const *const *) tcode, &cn, info);
+      ret = convert_file_to(fp, fcode, tocodes, &cn, info);
       if (ret != (size_t)(-1))
       {
         *fromcode = fcode;
@@ -1011,7 +1001,7 @@ static size_t convert_file_from_to(FILE *fp, const char *fromcodes, const char *
   else
   {
     /* There is only one fromcode */
-    ret = convert_file_to(fp, fromcodes, ncodes, (char const *const *) tcode, &cn, info);
+    ret = convert_file_to(fp, fromcodes, tocodes, &cn, info);
     if (ret != (size_t)(-1))
     {
       *tocode = tcode[cn];
@@ -1075,12 +1065,27 @@ struct Content *mutt_get_content_info(const char *fname, struct Body *b)
   if (b && (b->type == TYPE_TEXT) && (!b->noconv && !b->force_charset))
   {
     char *chs = mutt_param_get(&b->parameter, "charset");
-    char *fchs = b->use_disp ? (C_AttachCharset ? C_AttachCharset : C_Charset) : C_Charset;
-    if (C_Charset && (chs || C_SendCharset) &&
-        (convert_file_from_to(fp, fchs, chs ? chs : C_SendCharset, &fromcode,
-                              &tocode, info) != (size_t)(-1)))
+    char *fchs = C_Charset;
+
+    struct Slist *tocharsets = chs ? slist_parse(chs, SLIST_SEP_COLON) : NULL;
+
+    if (b->use_disp)
     {
-      if (!chs)
+      if (C_AttachCharset && (STAILQ_FIRST(&C_AttachCharset->head)))
+      {
+        fchs = STAILQ_FIRST(&C_AttachCharset->head)->data;
+      }
+    }
+
+    if (C_Charset && (chs || C_SendCharset) &&
+        (convert_file_from_to(fp, fchs, tocharsets ? tocharsets : C_SendCharset,
+                              &fromcode, &tocode, info) != (size_t)(-1)))
+    {
+      if (tocharsets)
+      {
+        slist_free(&tocharsets);
+      }
+      else
       {
         char chsbuf[256];
         mutt_ch_canonical_charset(chsbuf, sizeof(chsbuf), tocode);
