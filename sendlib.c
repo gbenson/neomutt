@@ -804,15 +804,17 @@ static void update_content_info(struct Content *info, struct ContentState *s,
  * in.
  */
 static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist *tocodes,
-                              int *tocode, struct Content *info)
+                              char **tocode_name, struct Content *info)
 {
   char bufi[256], bufu[512], bufo[4 * sizeof(bufi)];
   size_t ret;
+  int tocode;
 
   const iconv_t cd1 = mutt_ch_iconv_open("utf-8", fromcode, 0);
   if (cd1 == (iconv_t)(-1))
     return -1;
 
+  const char **tocode_names = mutt_mem_calloc(tocodes->count, sizeof(char*));
   iconv_t *cd = mutt_mem_calloc(tocodes->count, sizeof(iconv_t));
   size_t *score = mutt_mem_calloc(tocodes->count, sizeof(size_t));
   struct ContentState *states =
@@ -825,6 +827,7 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist
     STAILQ_FOREACH(node, &tocodes->head, entries)
     {
       const char *code = node->data;
+      tocode_names[i] = code;
       if (mutt_str_strcasecmp(code, "utf-8") != 0)
         cd[i] = mutt_ch_iconv_open(code, "utf-8", 0);
       else
@@ -908,7 +911,8 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist
       if ((cd[i] == (iconv_t)(-1)) && (score[i] == (size_t)(-1)))
       {
         /* Special case for conversion to UTF-8 */
-        *tocode = i;
+        *tocode_name = mutt_str_strdup(tocode_names[i]);
+        tocode = i;
         ret = 0;
         break;
       }
@@ -916,7 +920,8 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist
         continue;
       else if ((ret == (size_t)(-1)) || (score[i] < ret))
       {
-        *tocode = i;
+        *tocode_name = mutt_str_strdup(tocode_names[i]);
+        tocode = i;
         ret = score[i];
         if (ret == 0)
           break;
@@ -924,8 +929,8 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist
     }
     if (ret != (size_t)(-1))
     {
-      memcpy(info, &infos[*tocode], sizeof(struct Content));
-      update_content_info(info, &states[*tocode], 0, 0); /* EOF */
+      memcpy(info, &infos[tocode], sizeof(struct Content));
+      update_content_info(info, &states[tocode], 0, 0); /* EOF */
     }
   }
 
@@ -938,6 +943,7 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist
   FREE(&infos);
   FREE(&score);
   FREE(&states);
+  FREE(&tocode_names);
 
   return ret;
 }
@@ -959,7 +965,7 @@ static size_t convert_file_to(FILE *fp, const char *fromcode, const struct Slist
  * and return the number of characters converted inexactly. If no conversion
  * was possible, return -1.
  *
- * Both fromcodes and tocodes may be colon-separated lists of charsets.
+ * fromcodes may be colon-separated lists of charsets.
  * However, if fromcode is zero then fromcodes is assumed to be the name of a
  * single charset even if it contains a colon.
  */
@@ -968,13 +974,9 @@ static size_t convert_file_from_to(FILE *fp, const char *fromcodes,
                                    char **tocode, struct Content *info)
 {
   char *fcode = NULL;
-  char **tcode = NULL;
   const char *c = NULL, *c1 = NULL;
+  char *used_tocode_name = NULL;
   size_t ret;
-  int ncodes, i, cn;
-
-  /* Count the tocodes */
-  ncodes = tocodes->count;
 
   ret = (size_t)(-1);
   if (fromcode)
@@ -987,12 +989,11 @@ static size_t convert_file_from_to(FILE *fp, const char *fromcodes,
         continue;
       fcode = mutt_str_substr_dup(c, c1);
 
-      ret = convert_file_to(fp, fcode, tocodes, &cn, info);
+      ret = convert_file_to(fp, fcode, tocodes, &used_tocode_name, info);
       if (ret != (size_t)(-1))
       {
         *fromcode = fcode;
-        *tocode = tcode[cn];
-        tcode[cn] = 0;
+        *tocode = used_tocode_name;
         break;
       }
       FREE(&fcode);
@@ -1001,19 +1002,12 @@ static size_t convert_file_from_to(FILE *fp, const char *fromcodes,
   else
   {
     /* There is only one fromcode */
-    ret = convert_file_to(fp, fromcodes, tocodes, &cn, info);
+    ret = convert_file_to(fp, fromcodes, tocodes, &used_tocode_name, info);
     if (ret != (size_t)(-1))
     {
-      *tocode = tcode[cn];
-      tcode[cn] = 0;
+      *tocode = used_tocode_name;
     }
   }
-
-  /* Free memory */
-  for (i = 0; i < ncodes; i++)
-    FREE(&tcode[i]);
-
-  FREE(&tcode);
 
   return ret;
 }
